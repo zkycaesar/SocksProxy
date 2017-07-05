@@ -1,6 +1,5 @@
 package socksProxy;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
@@ -18,13 +17,15 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
+import java.util.logging.Logger;
 
 public class LocalServer {
 	private final int PORT = 1070;
 	private Selector selector;
 	ByteBuffer readBuffer;
 	private HashMap<SocketChannel, SocketChannel> cache;
-	private static HashSet<String> httpRequestTable = new HashSet<String>(){{add("GET"); add("POST"); add("CONNECT");add("HEAD");add("OPTIONS"); add("PUT"); add("DELETE"); add("TRACE");}};
+//	private static HashSet<String> httpRequestTable = new HashSet<String>(){{add("GET"); add("POST"); add("CONNECT");add("HEAD");add("OPTIONS"); add("PUT"); add("DELETE"); add("TRACE");}};
+	private final Logger logger = Logger.getLogger("Logger");
 	
 	public static void main(String[] args) {
 		LocalServer ls = new LocalServer();
@@ -40,7 +41,7 @@ public class LocalServer {
 			serverSocketChannel.socket().bind(new InetSocketAddress(PORT));
 			selector = Selector.open();
 			serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
-			readBuffer = ByteBuffer.allocate(2048);
+			readBuffer = ByteBuffer.allocate(1500);
 			cache = new HashMap<SocketChannel, SocketChannel>();
 		} catch (IOException e) {
 			e.printStackTrace();
@@ -53,7 +54,7 @@ public class LocalServer {
 			try {
 				selector.select();
 				count++;
-				System.out.println(count);
+				logger.info("" + count);
 				Iterator it = selector.selectedKeys().iterator();
 				while(it.hasNext()){
 					SelectionKey selectionKey = (SelectionKey)it.next();
@@ -78,7 +79,7 @@ public class LocalServer {
 				}				
 				socketChannel.configureBlocking(false);
 				socketChannel.register(selector, SelectionKey.OP_READ);
-				System.out.println("Accept socket: " + socketChannel.getRemoteAddress());
+				logger.info("Accept socket: " + socketChannel.getRemoteAddress());
 			} catch (IOException e) {
 				e.printStackTrace();
 			}
@@ -88,25 +89,43 @@ public class LocalServer {
 			Charset cs = Charset.forName ("UTF-8");
 			readBuffer.clear();
 			try {
-//				System.out.println("Read socket: " + socketChannel.getRemoteAddress());	
+//				logger.info("Try to read from socket: " + socketChannel.getRemoteAddress());
+				if(!socketChannel.isConnected()){
+					selectionKey.cancel();
+					return;
+				}
 				int count = socketChannel.read(readBuffer);
 				if(count > 0) {
 					readBuffer.flip();
-					CharBuffer charBuffer = cs.decode(readBuffer); 
-					String content = charBuffer.toString();
-		            System.out.println(socketChannel.getRemoteAddress());
-					System.out.println(content);
+					CharBuffer charBuffer = cs.decode(readBuffer);
+					String content = charBuffer.toString(); 
+					logger.info("Get message from: " + socketChannel.getRemoteAddress() + "\r\n The message is:\r\n" + content);
 					
 					String[] header = content.split(System.getProperty("line.separator"));
-					if(content.startsWith("CONNECT")){						
-						String remoteHost = header[1].substring(6);
-						int index = remoteHost.indexOf(":");
-						if(index != -1)remoteHost = remoteHost.substring(0, index);
-						if(!remoteHost.equals("bbs.sjtu.edu.cn"))return;
-						System.out.println("Remote host: " + remoteHost);
+					if(content.startsWith("CONNECT")){	
+						String remoteHost = null;
+						for(String item : header){
+							if(item.startsWith("Host")){
+								remoteHost = item.substring(6);
+								int index = remoteHost.indexOf(":");
+								if(index != -1)remoteHost = remoteHost.substring(0, index);
+								break;
+							}
+						}
+						if(remoteHost == null || remoteHost.indexOf("google") != -1){
+							socketChannel.close();
+							selectionKey.cancel();
+							return;
+						}
+						logger.info("Connecting to remote host: " + remoteHost);
 						SocketChannel remoteSocket = null;
 						remoteSocket = SocketChannel.open();
-						remoteSocket.connect(new InetSocketAddress(remoteHost, 443));
+						InetSocketAddress socAdd = new InetSocketAddress(remoteHost, 443);
+						if(socAdd.isUnresolved()){
+							logger.warning("Remote host " + remoteHost + " is unresolved.");
+							return;
+						}
+						remoteSocket.connect(socAdd);
 						remoteSocket.configureBlocking(false);
 						remoteSocket.register(selector, SelectionKey.OP_READ);
 						
@@ -130,20 +149,37 @@ public class LocalServer {
 									break;
 								}
 							}
+							if(remoteHost == null || remoteHost.indexOf("google") != -1){
+								socketChannel.close();
+								selectionKey.cancel();
+								return;
+							}
 							remoteSocket = SocketChannel.open();
-							remoteSocket.connect(new InetSocketAddress(remoteHost, 80));
+							InetSocketAddress socAdd = new InetSocketAddress(remoteHost, 443);
+							if(socAdd.isUnresolved()){
+								logger.warning("Remote host " + remoteHost + " is unresolved.");
+								return;
+							}
+							remoteSocket.connect(socAdd);
 							remoteSocket.configureBlocking(false);
 							remoteSocket.register(selector, SelectionKey.OP_READ);
+							cache.put(socketChannel, remoteSocket);
+							cache.put(remoteSocket, socketChannel);
 						}
-						remoteSocket.write(readBuffer);
-						while (socketChannel.read(readBuffer) >= 0 || readBuffer.remaining() != 0) {
-//							System.out.println("...............");
-							readBuffer.flip();
-							remoteSocket.write(readBuffer);
-						    readBuffer.compact();    // In case of partial write
+						readBuffer.flip();
+						System.out.println("write remain: " + readBuffer.remaining());
+						int writeCount = remoteSocket.write(readBuffer);
+						System.out.println("Write bytes: " + writeCount + " Total count: " + count);
+						while (writeCount < count) {							
+							writeCount += remoteSocket.write(readBuffer);
+//						    readBuffer.compact();    // In case of partial write
 						}	
 						System.out.println("Writing to: " + remoteSocket.getRemoteAddress());
 					}
+				}
+				else if(count == -1){
+					socketChannel.close();
+					selectionKey.cancel();
 				}
 			} catch (IOException e) {
 				e.printStackTrace();
