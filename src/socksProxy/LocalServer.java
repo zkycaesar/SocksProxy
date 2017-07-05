@@ -89,7 +89,6 @@ public class LocalServer {
 			Charset cs = Charset.forName ("UTF-8");
 			readBuffer.clear();
 			try {
-//				logger.info("Try to read from socket: " + socketChannel.getRemoteAddress());
 				if(!socketChannel.isConnected()){
 					selectionKey.cancel();
 					return;
