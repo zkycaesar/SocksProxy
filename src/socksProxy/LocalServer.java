@@ -109,7 +109,6 @@ public class LocalServer {
 					cache.remove(readSocketChannel);
 				}				
 				readSocketChannel.close();
-				return;
 			}
 			if(readByteCount > 0){
 				readBuffer.flip();
@@ -141,8 +140,9 @@ public class LocalServer {
 						System.out.println("Remote host " + remoteHost + " is unresolved.");
 						return;
 					}
-					remoteSocket.connect(socAdd);
 					remoteSocket.configureBlocking(false);
+					remoteSocket.connect(socAdd);
+					while(!remoteSocket.finishConnect()){}
 					remoteSocket.register(selector, SelectionKey.OP_READ);
 					
 					cache.put(readSocketChannel, remoteSocket);
@@ -155,35 +155,39 @@ public class LocalServer {
 				else{
 					System.out.println("!!!!!!!!!!!!");
 					SocketChannel remoteSocket = cache.get(readSocketChannel);	
-					try{
-						if(remoteSocket == null){
-							String remoteHost = null;
-							for(String item : header){
-								if(item.startsWith("Host")){
-									remoteHost = item.substring(6);
-									int index = remoteHost.indexOf(":");
-									if(index != -1)remoteHost = remoteHost.substring(0, index);
-									break;
+					if(remoteSocket == null){
+						String remoteHost = null;
+						int remotePort = 80;
+						for(String item : header){
+							if(item.startsWith("Host")){
+								remoteHost = item.substring(6);
+								int index = remoteHost.indexOf(":");
+								if(index != -1){
+									remotePort = Integer.parseInt(remoteHost.substring(index));
+									remoteHost = remoteHost.substring(0, index);									
 								}
+								break;
 							}
-							if(remoteHost == null || remoteHost.indexOf("google") != -1){
-								readSocketChannel.close();
-								selectionKey.cancel();
-								return;
-							}
-							remoteSocket = SocketChannel.open();
-							InetSocketAddress socAdd = new InetSocketAddress(remoteHost, 443);
-							if(socAdd.isUnresolved()){
-								System.out.println("Remote host " + remoteHost + " is unresolved.");
-								return;
-							}
-							remoteSocket.connect(socAdd);
-							remoteSocket.configureBlocking(false);
-							remoteSocket.register(selector, SelectionKey.OP_READ);
-							cache.put(readSocketChannel, remoteSocket);
-							cache.put(remoteSocket, readSocketChannel);
 						}
-						readBuffer.flip();
+						if(remoteHost == null || remoteHost.indexOf("google") != -1){
+							readSocketChannel.close();
+							selectionKey.cancel();
+							return;
+						}
+						remoteSocket = SocketChannel.open();
+						InetSocketAddress socAdd = new InetSocketAddress(remoteHost, remotePort);
+						if(socAdd.isUnresolved()){
+							System.out.println("Remote host " + remoteHost + " is unresolved.");
+							return;
+						}
+						remoteSocket.connect(socAdd);
+						remoteSocket.configureBlocking(false);
+						remoteSocket.register(selector, SelectionKey.OP_READ);
+						cache.put(readSocketChannel, remoteSocket);
+						cache.put(remoteSocket, readSocketChannel);
+					}
+					readBuffer.flip();
+					try{
 						System.out.println("write remain: " + readBuffer.remaining());
 						int writeCount = remoteSocket.write(readBuffer);
 						System.out.println("Write bytes: " + writeCount + " Total count: " + readByteCount);
@@ -193,25 +197,17 @@ public class LocalServer {
 						}	
 						System.out.println("Writing to: " + remoteSocket.getRemoteAddress());
 					}catch(IOException e){
-						cache.remove(readSocketChannel);
+						e.printStackTrace();
 						cache.remove(remoteSocket);
+						cache.remove(readSocketChannel);
+						selectionKey.cancel();
+						remoteSocket.keyFor(selector).cancel();
+						readSocketChannel.close();
 						remoteSocket.close();
-					}
-					
+					}					
 				}
 			}
-			try {
-				
-			} catch (IOException e1) {
-				e1.printStackTrace();
-				selectionKey.cancel();
-				try {
-					readSocketChannel.close();
-				} catch (IOException e) {
-					e.printStackTrace();
-				}
-				cache.remove(readSocketChannel);
-			}
+			
 			
 		}
 	}
