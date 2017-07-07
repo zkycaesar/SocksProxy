@@ -1,11 +1,7 @@
 package socksProxy;
 
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
@@ -15,40 +11,33 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
-import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
-public class LocalServer {
-	private final int PORT = 1070;
+public class ProxyServer {
+
+	private final int PORT = 19925;
 	private Selector selector;
-	private ServerSocketChannel serverSocketChannel;
-	private ByteBuffer readBuffer;
-	private HashMap<SocketChannel, SocketChannel> localToProxy;
-	private HashMap<SocketChannel, SocketChannel> ProxyToLocal;
-	private ExecutorService pool = Executors.newFixedThreadPool(3); 
+	ByteBuffer readBuffer;
+	private HashMap<SocketChannel, SocketChannel> cache;
 //	private static HashSet<String> httpRequestTable = new HashSet<String>(){{add("GET"); add("POST"); add("CONNECT");add("HEAD");add("OPTIONS"); add("PUT"); add("DELETE"); add("TRACE");}};
 //	private final Logger logger = Logger.getLogger("Logger");
 	
 	public static void main(String[] args) {
-		LocalServer ls = new LocalServer();
-		ls.init();
-		ls.select();
+		ProxyServer ps = new ProxyServer();
+		ps.init();
+		ps.select();
 	}
 	
-	private void init(){		
+	private void init(){
+		ServerSocketChannel serverSocketChannel;
 		try {
-			selector = Selector.open();
 			serverSocketChannel = ServerSocketChannel.open();
 			serverSocketChannel.configureBlocking(false);
-			serverSocketChannel.socket().bind(new InetSocketAddress(PORT));			
+			serverSocketChannel.socket().bind(new InetSocketAddress(PORT));
+			selector = Selector.open();
 			serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
-			serverSocketChannel.keyFor(selector).attach(new Acceptor());
 			readBuffer = ByteBuffer.allocate(4096);
+			cache = new HashMap<SocketChannel, SocketChannel>();
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
@@ -66,29 +55,17 @@ public class LocalServer {
 					SelectionKey selectionKey = (SelectionKey)it.next();
 					if(!selectionKey.isValid()) continue;
 					it.remove();
-					Runnable r = (Runnable) (selectionKey.attachment());  
-			        r.run();
-//					handleKey(selectionKey);
+					handleKey(selectionKey);
 				}
 			} catch (IOException e) {
+				// TODO Auto-generated catch block
 				e.printStackTrace();
 			}
 		}
 	}
 	
-	private class Acceptor implements Runnable {  		  
-        public void run() {  
-            try {  
-                SocketChannel c = serverSocketChannel.accept();  
-                if (c != null)  
-                    pool.execute(new SocketReadHandler(selector, c));  
-            } catch (IOException e) {  
-                e.printStackTrace();  
-            }  
-        }    
-    }  
-	
-	private void handleKey(SelectionKey selectionKey){
+	private void handleKey(SelectionKey selectionKey) throws IOException{
+		
 		if(selectionKey.isAcceptable()){
 			SocketChannel accSocketChannel = null;
 			ServerSocketChannel serverSocketChannel = (ServerSocketChannel)selectionKey.channel();
@@ -117,7 +94,7 @@ public class LocalServer {
 			} catch (IOException e1) {
 				e1.printStackTrace();
 				selectionKey.cancel();
-				
+				SocketChannel pair = cache.get(readSocketChannel);
 				if(pair != null){
 					pair.close();
 					pair.keyFor(selector).cancel();
@@ -225,67 +202,9 @@ public class LocalServer {
 					}					
 				}
 			}
+			
+			
 		}
 	}
-	
-}
 
-//public class LocalServer {
-//	private static final int PORT = 1070;
-//	private static class Handler implements Runnable{
-//	    private Socket socket;
-//	    public Handler(Socket socket){
-//	        this.socket=socket;
-//	    }
-//	    
-//	    public void run(){
-//	        try{
-//	        	InetAddress srcAddr = socket.getInetAddress();
-//	        	int srcPort = socket.getPort();
-//	            System.out.println("新连接:" + srcAddr+":" + srcPort);
-//	            BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-////	            char[] buffer = new char[2048];
-////	            int inputLen;
-////	            while((inputLen = input.read(buffer)) != -1){
-////	            	
-////	            }
-//	            String buffer = null;
-//	            while((buffer = input.readLine()) != null){
-//	            	System.out.println(buffer);
-//	            }
-//	            input.close();
-//	            if (socket != null) {    
-//	                try {    
-//	                    socket.close();    
-//	                } catch (Exception e) {    
-//	                    socket = null;    
-//	                    System.out.println("服务端 finally 异常:" + e.getMessage());    
-//	                }    
-//	            }
-//	        }catch(Exception e){e.printStackTrace();}finally{
-//	            try{
-//	                System.out.println("关闭连接:"+socket.getInetAddress()+":"+socket.getPort());
-//	                if(socket!=null)socket.close();
-//	            }catch(IOException e){
-//	                e.printStackTrace();
-//	            }
-//	        }
-//	    }
-//	}
-//
-//	public static void main(String[] args) {
-//		try {
-//			ServerSocket serverSocket = new ServerSocket(PORT);
-//			while(true){
-//				Socket socket = serverSocket.accept();
-//				Thread workThread=new Thread(new Handler(socket));
-//	            workThread.start();
-//			}
-//            
-//		} catch (IOException e) {
-//			e.printStackTrace();
-//		}
-//
-//	}
-//
-//}
+}
