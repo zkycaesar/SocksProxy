@@ -25,14 +25,15 @@ import java.util.logging.Logger;
 
 public class LocalServer {
 	private final int PORT = 1070;
-	private Selector selector;
+	private final int poolSize = Runtime.getRuntime().availableProcessors() + 1;
+	private Selector accSelector;
+	private Selector[] rwSelector;
 	private ServerSocketChannel serverSocketChannel;
-	private ByteBuffer readBuffer;
-	private HashMap<SocketChannel, SocketChannel> localToProxy;
-	private HashMap<SocketChannel, SocketChannel> ProxyToLocal;
-	private ExecutorService pool = Executors.newFixedThreadPool(3); 
-//	private static HashSet<String> httpRequestTable = new HashSet<String>(){{add("GET"); add("POST"); add("CONNECT");add("HEAD");add("OPTIONS"); add("PUT"); add("DELETE"); add("TRACE");}};
-//	private final Logger logger = Logger.getLogger("Logger");
+//	private ByteBuffer readBuffer;
+//	private HashMap<SocketChannel, SocketChannel> localToProxy;
+//	private HashMap<SocketChannel, SocketChannel> ProxyToLocal;
+	private int selectorIndex;
+//	private ExecutorService pool = Executors.newCachedThreadPool(); 
 	
 	public static void main(String[] args) {
 		LocalServer ls = new LocalServer();
@@ -42,13 +43,18 @@ public class LocalServer {
 	
 	private void init(){		
 		try {
-			selector = Selector.open();
+			accSelector = Selector.open();
 			serverSocketChannel = ServerSocketChannel.open();
 			serverSocketChannel.configureBlocking(false);
 			serverSocketChannel.socket().bind(new InetSocketAddress(PORT));			
-			serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
-			serverSocketChannel.keyFor(selector).attach(new Acceptor());
-			readBuffer = ByteBuffer.allocate(4096);
+			serverSocketChannel.register(accSelector, SelectionKey.OP_ACCEPT);
+//			readBuffer = ByteBuffer.allocate(4096);
+			rwSelector = new Selector[poolSize];
+			for(int i = 0; i < poolSize; i++){
+				Processor p = new Processor(rwSelector[i]);
+				new Thread(p).start();
+			}
+			selectorIndex = 0;
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
@@ -58,35 +64,29 @@ public class LocalServer {
 		int count = 0;
 		while(true){
 			try {
-				selector.select();
+				accSelector.select();
 				count++;
 //				System.out.println("" + count);
-				Iterator it = selector.selectedKeys().iterator();
+				Iterator it = accSelector.selectedKeys().iterator();
 				while(it.hasNext()){
 					SelectionKey selectionKey = (SelectionKey)it.next();
 					if(!selectionKey.isValid()) continue;
 					it.remove();
-					Runnable r = (Runnable) (selectionKey.attachment());  
-			        r.run();
-//					handleKey(selectionKey);
+					SocketChannel c = serverSocketChannel.accept();
+					while(c == null){
+						c = serverSocketChannel.accept();
+					}				
+					c.configureBlocking(false);
+					SelectionKey key = c.register(rwSelector[selectorIndex], SelectionKey.OP_READ);
+					key.attach("local");
+					selectorIndex++;
+					System.out.println("Accept socket: " + c.getRemoteAddress());
 				}
 			} catch (IOException e) {
 				e.printStackTrace();
 			}
 		}
 	}
-	
-	private class Acceptor implements Runnable {  		  
-        public void run() {  
-            try {  
-                SocketChannel c = serverSocketChannel.accept();  
-                if (c != null)  
-                    pool.execute(new SocketReadHandler(selector, c));  
-            } catch (IOException e) {  
-                e.printStackTrace();  
-            }  
-        }    
-    }  
 	
 	private void handleKey(SelectionKey selectionKey){
 		if(selectionKey.isAcceptable()){
@@ -97,7 +97,7 @@ public class LocalServer {
 					accSocketChannel = serverSocketChannel.accept();
 				}				
 				accSocketChannel.configureBlocking(false);
-				accSocketChannel.register(selector, SelectionKey.OP_READ);
+				accSocketChannel.register(accSelector, SelectionKey.OP_READ);
 				System.out.println("Accept socket: " + accSocketChannel.getRemoteAddress());
 			} catch (IOException e) {
 				e.printStackTrace();
@@ -120,7 +120,7 @@ public class LocalServer {
 				
 				if(pair != null){
 					pair.close();
-					pair.keyFor(selector).cancel();
+					pair.keyFor(accSelector).cancel();
 					cache.remove(pair);
 					cache.remove(readSocketChannel);
 				}				
@@ -161,7 +161,7 @@ public class LocalServer {
 					remoteSocket.configureBlocking(false);
 					remoteSocket.connect(socAdd);
 					while(!remoteSocket.finishConnect()){}
-					remoteSocket.register(selector, SelectionKey.OP_READ);
+					remoteSocket.register(accSelector, SelectionKey.OP_READ);
 					
 					cache.put(readSocketChannel, remoteSocket);
 					cache.put(remoteSocket, readSocketChannel);
@@ -200,7 +200,7 @@ public class LocalServer {
 						}
 						remoteSocket.connect(socAdd);
 						remoteSocket.configureBlocking(false);
-						remoteSocket.register(selector, SelectionKey.OP_READ);
+						remoteSocket.register(accSelector, SelectionKey.OP_READ);
 						cache.put(readSocketChannel, remoteSocket);
 						cache.put(remoteSocket, readSocketChannel);
 					}
@@ -219,7 +219,7 @@ public class LocalServer {
 						cache.remove(remoteSocket);
 						cache.remove(readSocketChannel);
 						selectionKey.cancel();
-						remoteSocket.keyFor(selector).cancel();
+						remoteSocket.keyFor(accSelector).cancel();
 						readSocketChannel.close();
 						remoteSocket.close();
 					}					
