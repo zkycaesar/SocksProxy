@@ -25,7 +25,8 @@ import java.util.logging.Logger;
 
 public class LocalServer {
 	private final int PORT = 1070;
-	private final int poolSize = Runtime.getRuntime().availableProcessors() + 1;
+//	private final int poolSize = Runtime.getRuntime().availableProcessors() + 1;
+	private final int poolSize = 2;
 	private Selector accSelector;
 	private Selector[] rwSelector;
 	private ServerSocketChannel serverSocketChannel;
@@ -43,6 +44,7 @@ public class LocalServer {
 	
 	private void init(){		
 		try {
+			System.out.println("Initiallying");
 			accSelector = Selector.open();
 			serverSocketChannel = ServerSocketChannel.open();
 			serverSocketChannel.configureBlocking(false);
@@ -50,10 +52,16 @@ public class LocalServer {
 			serverSocketChannel.register(accSelector, SelectionKey.OP_ACCEPT);
 //			readBuffer = ByteBuffer.allocate(4096);
 			rwSelector = new Selector[poolSize];
+			Thread[] threads = new Thread[poolSize];
 			for(int i = 0; i < poolSize; i++){
+				rwSelector[i] = Selector.open();
 				Processor p = new Processor(rwSelector[i]);
-				new Thread(p).start();
+				threads[i] = new Thread(p);
+				threads[i].start();
 			}
+			System.out.println("Totally " + poolSize + " Thread started.");
+			Monitor monitor = new Monitor(threads);
+			new Thread(monitor).start();
 			selectorIndex = 0;
 		} catch (IOException e) {
 			e.printStackTrace();
@@ -61,17 +69,19 @@ public class LocalServer {
 	}
 	
 	private void select(){
+		System.out.println("Start acceptor.");
 		int count = 0;
 		while(true){
 			try {
 				accSelector.select();
+				
 				count++;
 //				System.out.println("" + count);
 				Iterator it = accSelector.selectedKeys().iterator();
 				while(it.hasNext()){
 					SelectionKey selectionKey = (SelectionKey)it.next();
-					if(!selectionKey.isValid()) continue;
 					it.remove();
+					if(!selectionKey.isValid()) continue;					
 					SocketChannel c = serverSocketChannel.accept();
 					while(c == null){
 						c = serverSocketChannel.accept();
@@ -79,151 +89,14 @@ public class LocalServer {
 					c.configureBlocking(false);
 					SelectionKey key = c.register(rwSelector[selectorIndex], SelectionKey.OP_READ);
 					key.attach("local");
-					selectorIndex++;
+					rwSelector[selectorIndex].wakeup();
+					selectorIndex = (selectorIndex + 1) % poolSize;
 					System.out.println("Accept socket: " + c.getRemoteAddress());
 				}
+//				Thread.sleep(1);
+				
 			} catch (IOException e) {
 				e.printStackTrace();
-			}
-		}
-	}
-	
-	private void handleKey(SelectionKey selectionKey){
-		if(selectionKey.isAcceptable()){
-			SocketChannel accSocketChannel = null;
-			ServerSocketChannel serverSocketChannel = (ServerSocketChannel)selectionKey.channel();
-			try {
-				while(accSocketChannel == null){
-					accSocketChannel = serverSocketChannel.accept();
-				}				
-				accSocketChannel.configureBlocking(false);
-				accSocketChannel.register(accSelector, SelectionKey.OP_READ);
-				System.out.println("Accept socket: " + accSocketChannel.getRemoteAddress());
-			} catch (IOException e) {
-				e.printStackTrace();
-			}
-		}
-		else if(selectionKey.isReadable()){
-			SocketChannel readSocketChannel = null;
-			readSocketChannel = (SocketChannel)selectionKey.channel();
-			SocketAddress readSocAddr = null;
-			Charset cs = Charset.forName ("UTF-8");
-			readBuffer.clear();
-			int readByteCount = 0;			
-			try {
-				readSocAddr = readSocketChannel.getRemoteAddress();
-				int tmpCount = 0;
-				while((tmpCount = readSocketChannel.read(readBuffer)) > 0) readByteCount += tmpCount;
-			} catch (IOException e1) {
-				e1.printStackTrace();
-				selectionKey.cancel();
-				
-				if(pair != null){
-					pair.close();
-					pair.keyFor(accSelector).cancel();
-					cache.remove(pair);
-					cache.remove(readSocketChannel);
-				}				
-				readSocketChannel.close();
-				return;
-			}
-			if(readByteCount > 0){
-				readBuffer.flip();
-				CharBuffer charBuffer = cs.decode(readBuffer);
-				String content = charBuffer.toString(); 
-//				System.out.println("Get message from: " + readSocAddr + "\r\n The message is:\r\n" + content);
-				System.out.println("Get message from: " + readSocAddr + ". Byte count: " + readByteCount + "\r\n The message is:\r\n" + content);
-				
-				String[] header = content.split(System.getProperty("line.separator"));
-				if(content.startsWith("CONNECT")){	
-					String remoteHost = null;
-					for(String item : header){
-						if(item.startsWith("Host")){
-							remoteHost = item.substring(6);
-							int index = remoteHost.indexOf(":");
-							if(index != -1)remoteHost = remoteHost.substring(0, index);
-							break;
-						}
-					}
-					if(remoteHost == null || remoteHost.indexOf("google") != -1){
-						readSocketChannel.close();
-						selectionKey.cancel();
-						return;
-					}
-					System.out.println("Connecting to remote host: " + remoteHost);
-					SocketChannel remoteSocket = null;
-					remoteSocket = SocketChannel.open();
-					InetSocketAddress socAdd = new InetSocketAddress(remoteHost, 443);
-					if(socAdd.isUnresolved()){
-						System.out.println("Remote host " + remoteHost + " is unresolved.");
-						return;
-					}
-					remoteSocket.configureBlocking(false);
-					remoteSocket.connect(socAdd);
-					while(!remoteSocket.finishConnect()){}
-					remoteSocket.register(accSelector, SelectionKey.OP_READ);
-					
-					cache.put(readSocketChannel, remoteSocket);
-					cache.put(remoteSocket, readSocketChannel);
-					readBuffer.clear();
-					readBuffer.put(cs.encode(CharBuffer.wrap("HTTP/1.1 200 Connection established" + System.getProperty("line.separator") + System.getProperty("line.separator"))));
-					readBuffer.flip();
-					while(readBuffer.hasRemaining())readSocketChannel.write(readBuffer);
-				}
-				else{
-					System.out.println("!!!!!!!!!!!!");
-					SocketChannel remoteSocket = cache.get(readSocketChannel);	
-					if(remoteSocket == null){
-						String remoteHost = null;
-						int remotePort = 80;
-						for(String item : header){
-							if(item.startsWith("Host")){
-								remoteHost = item.substring(6);
-								int index = remoteHost.indexOf(":");
-								if(index != -1){
-									remotePort = Integer.parseInt(remoteHost.substring(index));
-									remoteHost = remoteHost.substring(0, index);									
-								}
-								break;
-							}
-						}
-						if(remoteHost == null || remoteHost.indexOf("google") != -1){
-							readSocketChannel.close();
-							selectionKey.cancel();
-							return;
-						}
-						remoteSocket = SocketChannel.open();
-						InetSocketAddress socAdd = new InetSocketAddress(remoteHost, remotePort);
-						if(socAdd.isUnresolved()){
-							System.out.println("Remote host " + remoteHost + " is unresolved.");
-							return;
-						}
-						remoteSocket.connect(socAdd);
-						remoteSocket.configureBlocking(false);
-						remoteSocket.register(accSelector, SelectionKey.OP_READ);
-						cache.put(readSocketChannel, remoteSocket);
-						cache.put(remoteSocket, readSocketChannel);
-					}
-					readBuffer.flip();
-					try{
-						System.out.println("write remain: " + readBuffer.remaining());
-						int writeCount = remoteSocket.write(readBuffer);
-						System.out.println("Write bytes: " + writeCount + " Total count: " + readByteCount);
-						while (writeCount < readByteCount) {							
-							writeCount += remoteSocket.write(readBuffer);
-//						    readBuffer.compact();    // In case of partial write
-						}	
-						System.out.println("Writing to: " + remoteSocket.getRemoteAddress());
-					}catch(IOException e){
-						e.printStackTrace();
-						cache.remove(remoteSocket);
-						cache.remove(readSocketChannel);
-						selectionKey.cancel();
-						remoteSocket.keyFor(accSelector).cancel();
-						readSocketChannel.close();
-						remoteSocket.close();
-					}					
-				}
 			}
 		}
 	}
