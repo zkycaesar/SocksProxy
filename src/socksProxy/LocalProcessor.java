@@ -11,15 +11,27 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.logging.FileHandler;
+import java.util.logging.Formatter;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
-public class Processor implements Runnable {
+public class LocalProcessor implements Runnable {
 	private Selector selector;
 	private ByteBuffer readBuffer;
+	private ByteBuffer writeBuffer;
 	private HashMap<SocketChannel, SocketChannel> localToProxy;
 	private HashMap<SocketChannel, SocketChannel> proxyToLocal;
+	private int threadID;
+	private Logger logger;
+	private String proxyServerIP = "";
+	private int proxyServerPort = 19925;
 	
-	public Processor(Selector sel){
+	
+	public LocalProcessor(Selector sel, int id) throws SecurityException, IOException{
+		threadID = id;
 		readBuffer = ByteBuffer.allocate(1500);
+		writeBuffer = ByteBuffer.allocate(1500);
 		selector = sel;
 		localToProxy = new HashMap<SocketChannel, SocketChannel>();
 		proxyToLocal = new HashMap<SocketChannel, SocketChannel>();
@@ -30,6 +42,10 @@ public class Processor implements Runnable {
 				e.printStackTrace();
 			}
 		}
+		logger = Logger.getLogger("Processor " + threadID);
+		FileHandler fileHandler = new FileHandler("Processor " + threadID + ".log"); 
+		fileHandler.setFormatter(new FileLogFormatter());
+		logger.addHandler(fileHandler);
 	}
 
 	@Override
@@ -57,17 +73,49 @@ public class Processor implements Runnable {
 	private void handleKey(SelectionKey key) throws IOException{
 		SocketChannel readSocketChannel = null;
 		SocketChannel remoteSocket = null;
-		readSocketChannel = (SocketChannel)key.channel();
 		SocketAddress readSocAddr = null;
-		Charset cs = Charset.forName ("UTF-8");
+		
+		readSocketChannel = (SocketChannel)key.channel();		
+		
+		
+		if(key.attachment() != null){
+			remoteSocket = localToProxy.get(readSocketChannel);
+			if(remoteSocket == null) {
+				remoteSocket = SocketChannel.open();
+				InetSocketAddress proxyServerAddr = new InetSocketAddress(proxyServerIP, proxyServerPort);
+				if(proxyServerAddr.isUnresolved()){
+					readSocketChannel.close();
+					key.cancel();
+//					System.out.println("Remote host " + remoteHost + " is unresolved.");
+					logger.info("Proxy server " + proxyServerIP + " is unresolved.");
+					return;
+				}
+				try {
+					remoteSocket.configureBlocking(false);
+					remoteSocket.connect(proxyServerAddr);
+					while(!remoteSocket.finishConnect()){}					
+				} catch(IOException e) {
+					e.printStackTrace();
+					logger.severe(e.getMessage());
+					readSocketChannel.close();
+					key.cancel();
+					return;
+				}	
+				remoteSocket.register(selector, SelectionKey.OP_READ);
+				localToProxy.put(readSocketChannel, remoteSocket);
+				proxyToLocal.put(remoteSocket, readSocketChannel);
+			}
+		}
+		
 		readBuffer.clear();
+		writeBuffer.clear();
 		int readByteCount = 0;			
 		try {
 			readSocAddr = readSocketChannel.getRemoteAddress();
-			int tmpCount = 0;
 			readByteCount = readSocketChannel.read(readBuffer);
 		} catch (IOException e1) {
 			e1.printStackTrace();
+			logger.severe(e1.getMessage());
 			SocketChannel pair = null;
 			if(key.attachment() != null){
 				pair = localToProxy.get(readSocketChannel);
@@ -114,136 +162,17 @@ public class Processor implements Runnable {
 			key.cancel();
 			readSocketChannel.close();
 			return;
+		}		
+	}
+	
+	private class FileLogFormatter extends Formatter{
+
+		@Override
+		public String format(LogRecord record) {
+			String log = record.getLevel() + ":" + record.getMessage()+"\r\n"; 
+			return log;
 		}
 		
-		if(key.attachment() != null){
-			readBuffer.flip();
-			CharBuffer charBuffer = cs.decode(readBuffer);
-			String content = charBuffer.toString(); 
-//			System.out.println("Get message from: " + readSocAddr + ". Byte count: " + readByteCount);
-//			System.out.println("Get message from: " + readSocAddr + ". Byte count: " + readByteCount + "\r\nThe message is:\r\n" + content);
-			
-			String[] header = content.split(System.getProperty("line.separator"));
-			if(content.startsWith("CONNECT")){	
-				String remoteHost = null;
-				for(String item : header){
-					if(item.startsWith("Host")){
-						remoteHost = item.substring(6);
-						int index = remoteHost.indexOf(":");
-						if(index != -1)remoteHost = remoteHost.substring(0, index);
-						break;
-					}
-				}
-				if(remoteHost == null || remoteHost.indexOf("google") != -1){
-					readSocketChannel.close();
-					key.cancel();
-					return;
-				}
-				System.out.println("Connecting to remote host: " + remoteHost);
-				remoteSocket = SocketChannel.open();
-				InetSocketAddress socAdd = new InetSocketAddress(remoteHost, 443);
-				if(socAdd.isUnresolved()){
-					readSocketChannel.close();
-					key.cancel();
-					System.out.println("Remote host " + remoteHost + " is unresolved.");
-					return;
-				}
-				remoteSocket.configureBlocking(false);
-				remoteSocket.connect(socAdd);
-				while(!remoteSocket.finishConnect()){}
-				remoteSocket.register(selector, SelectionKey.OP_READ);
-				
-				localToProxy.put(readSocketChannel, remoteSocket);
-				proxyToLocal.put(remoteSocket, readSocketChannel);
-				readBuffer.clear();
-				readBuffer.put(cs.encode(CharBuffer.wrap("HTTP/1.1 200 Connection established" + System.getProperty("line.separator") + System.getProperty("line.separator"))));
-				readBuffer.flip();
-				int writeCount = 0;
-				while(readBuffer.hasRemaining())writeCount += readSocketChannel.write(readBuffer);
-				System.out.println("Get message from: " + readSocAddr + ". Byte count: " + readByteCount + "\r\nWriting " + writeCount + " bytes to: " + remoteSocket.getRemoteAddress());
-				return;
-			}
-			else{
-				remoteSocket = localToProxy.get(readSocketChannel);
-				if(remoteSocket == null){
-					String remoteHost = null;
-					int remotePort = 80;
-					for(String item : header){
-						if(item.startsWith("Host")){
-							remoteHost = item.substring(6);
-							int index = remoteHost.indexOf(":");
-							if(index != -1){
-								remotePort = Integer.parseInt(remoteHost.substring(index));
-								remoteHost = remoteHost.substring(0, index);									
-							}
-							break;
-						}
-					}
-					if(remoteHost == null || remoteHost.indexOf("google") != -1){
-						readSocketChannel.close();
-						key.cancel();
-						return;
-					}
-					remoteSocket = SocketChannel.open();
-					InetSocketAddress socAdd = new InetSocketAddress(remoteHost, remotePort);
-					if(socAdd.isUnresolved()){
-						readSocketChannel.close();
-						key.cancel();
-						System.out.println("Remote host " + remoteHost + " is unresolved.");
-						return;
-					}
-					try{
-						remoteSocket.connect(socAdd);
-						remoteSocket.configureBlocking(false);
-						remoteSocket.register(selector, SelectionKey.OP_READ);
-					}catch(IOException e){
-						e.printStackTrace();
-						key.cancel();
-						readSocketChannel.close();
-					}					
-					localToProxy.put(readSocketChannel, remoteSocket);
-					proxyToLocal.put(remoteSocket, readSocketChannel);					
-				}
-			}
-		}
-		else{
-			remoteSocket = proxyToLocal.get(readSocketChannel);
-			if(remoteSocket == null){
-				key.cancel();
-				readSocketChannel.close();
-				return;
-			}
-		}
-		
-		try{
-			readBuffer.flip();
-			int writeCount = remoteSocket.write(readBuffer);
-			readBuffer.compact();
-			int tmpReadCount = 0;
-			while(readBuffer.position() != 0 || (tmpReadCount = readSocketChannel.read(readBuffer)) > 0){
-				readBuffer.flip();
-				writeCount += remoteSocket.write(readBuffer);
-				readByteCount += tmpReadCount; 
-				readBuffer.compact();
-			}
-			System.out.println("Get message from: " + readSocAddr + ". Byte count: " + readByteCount + 
-					"\r\nWriting " + writeCount + " bytes to: " + remoteSocket.getRemoteAddress());
-//			System.out.println("Writing " + writeCount + " bytes to: " + remoteSocket.getRemoteAddress());
-		}catch(IOException e){
-			e.printStackTrace();
-			if(key.attachment() != null){
-				localToProxy.remove(remoteSocket);
-				proxyToLocal.remove(readSocketChannel);
-			}
-			else{
-				proxyToLocal.remove(remoteSocket);
-				localToProxy.remove(readSocketChannel);
-			}					
-			key.cancel();
-			remoteSocket.keyFor(selector).cancel();
-			readSocketChannel.close();
-			remoteSocket.close();
-		}
 	}
 	
 //	private void handleKey(SelectionKey key) throws IOException{
