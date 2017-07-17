@@ -9,12 +9,23 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.KeySpec;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.logging.FileHandler;
 import java.util.logging.Formatter;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+
+import javax.crypto.Cipher;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.SecretKeySpec;
 
 public class LocalProcessor implements Runnable {
 	private Selector selector;
@@ -26,6 +37,7 @@ public class LocalProcessor implements Runnable {
 	private Logger logger;
 	private String proxyServerIP = "";
 	private int proxyServerPort = 19925;
+	private String secretKey = "";
 	
 	
 	public LocalProcessor(Selector sel, int id) throws SecurityException, IOException{
@@ -74,13 +86,14 @@ public class LocalProcessor implements Runnable {
 		SocketChannel readSocketChannel = null;
 		SocketChannel remoteSocket = null;
 		SocketAddress readSocAddr = null;
+		Charset cs = Charset.forName ("UTF-8");
 		
 		readSocketChannel = (SocketChannel)key.channel();		
 		
 		
 		if(key.attachment() != null){
 			remoteSocket = localToProxy.get(readSocketChannel);
-			if(remoteSocket == null) {
+			if(remoteSocket == null || !remoteSocket.isConnected()) {
 				remoteSocket = SocketChannel.open();
 				InetSocketAddress proxyServerAddr = new InetSocketAddress(proxyServerIP, proxyServerPort);
 				if(proxyServerAddr.isUnresolved()){
@@ -101,11 +114,58 @@ public class LocalProcessor implements Runnable {
 					key.cancel();
 					return;
 				}	
+				
+				byte[] request = new byte[3];
+				request[0] = 0x05;
+				request[1] = 0x01;
+				request[2] = 0x02;
+				writeBuffer.put(request);
+				writeBuffer.flip();
+				try {
+					while(writeBuffer.hasRemaining())remoteSocket.write(writeBuffer);
+					int readByteCount = 0;
+					while((readByteCount = readSocketChannel.read(readBuffer)) == 0) {}
+					if(readByteCount == -1) {
+						logger.severe("Socks connection establishment failed.");
+						readSocketChannel.close();
+						remoteSocket.close();
+						key.cancel();
+						return;
+					}
+					readBuffer.flip();
+					byte[] response = new byte[2];
+					readBuffer.get(response);
+					if(response[0] != 0x05 || response[1] != 0x03) {
+						logger.severe("Socks connection establishment failed.");
+						readSocketChannel.close();
+						remoteSocket.close();
+						key.cancel();
+						return;
+					}
+				} catch(IOException e) {
+					e.printStackTrace();
+					logger.severe(e.getMessage() + "\r\nSocks connection establishment failed.");					
+					readSocketChannel.close();
+					key.cancel();
+					return;
+				}	
+				
 				remoteSocket.register(selector, SelectionKey.OP_READ);
 				localToProxy.put(readSocketChannel, remoteSocket);
-				proxyToLocal.put(remoteSocket, readSocketChannel);
+				proxyToLocal.put(remoteSocket, readSocketChannel);	
+				return;
 			}
 		}
+		else {
+			remoteSocket = proxyToLocal.get(readSocketChannel);
+			if(remoteSocket == null) {
+				logger.severe("Unknown Connection. Drop it.");
+				readSocketChannel.close();
+				key.cancel();
+				return;
+			}			
+		}
+		
 		
 		readBuffer.clear();
 		writeBuffer.clear();
@@ -116,53 +176,47 @@ public class LocalProcessor implements Runnable {
 		} catch (IOException e1) {
 			e1.printStackTrace();
 			logger.severe(e1.getMessage());
-			SocketChannel pair = null;
 			if(key.attachment() != null){
-				pair = localToProxy.get(readSocketChannel);
-				if(pair != null){
-					pair.close();
-					pair.keyFor(selector).cancel();
-					proxyToLocal.remove(pair);
-					localToProxy.remove(readSocketChannel);
-				}
+				proxyToLocal.remove(remoteSocket);
+				localToProxy.remove(readSocketChannel);
 			}
 			else{
-				pair = proxyToLocal.get(readSocketChannel);
-				if(pair != null){
-					pair.close();
-					pair.keyFor(selector).cancel();
-					localToProxy.remove(pair);
-					proxyToLocal.remove(readSocketChannel);
-				}
-			}			
+				localToProxy.remove(remoteSocket);
+				proxyToLocal.remove(readSocketChannel);
+			}	
+			remoteSocket.close();
+			remoteSocket.keyFor(selector).cancel();
 			key.cancel();
 			readSocketChannel.close();
 			return;
 		}
 		if(readByteCount == -1){
-			SocketChannel pair = null;
 			if(key.attachment() != null){
-				pair = localToProxy.get(readSocketChannel);
-				if(pair != null){
-					pair.close();
-					pair.keyFor(selector).cancel();
-					proxyToLocal.remove(pair);
-					localToProxy.remove(readSocketChannel);
-				}
+				proxyToLocal.remove(remoteSocket);
+				localToProxy.remove(readSocketChannel);
 			}
 			else{
-				pair = proxyToLocal.get(readSocketChannel);
-				if(pair != null){
-					pair.close();
-					pair.keyFor(selector).cancel();
-					localToProxy.remove(pair);
-					proxyToLocal.remove(readSocketChannel);
-				}
-			}			
+				localToProxy.remove(remoteSocket);
+				proxyToLocal.remove(readSocketChannel);
+			}	
+			remoteSocket.close();
+			remoteSocket.keyFor(selector).cancel();
 			key.cancel();
 			readSocketChannel.close();
 			return;
-		}		
+		}
+		
+		Cipher cipher = null;
+		try {
+			cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+			SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1");
+			KeySpec spec = new PBEKeySpec(secretKey.toCharArray());
+			SecretKey tmp = factory.generateSecret(spec);
+			SecretKey secret = new SecretKeySpec(tmp.getEncoded(), "AES");
+			cipher.init(Cipher.ENCRYPT_MODE, secret);
+		} catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeySpecException | InvalidKeyException e) {
+			e.printStackTrace();
+		}
 	}
 	
 	private class FileLogFormatter extends Formatter{
