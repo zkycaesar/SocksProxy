@@ -9,10 +9,13 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
+import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
+import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.KeySpec;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.logging.FileHandler;
@@ -24,6 +27,7 @@ import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
 import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -37,7 +41,7 @@ public class LocalProcessor implements Runnable {
 	private Logger logger;
 	private String proxyServerIP = "";
 	private int proxyServerPort = 19925;
-	private String secretKey = "";
+	private String password = "123456";
 	
 	
 	public LocalProcessor(Selector sel, int id) throws SecurityException, IOException{
@@ -166,13 +170,56 @@ public class LocalProcessor implements Runnable {
 			}			
 		}
 		
+		Cipher encCipher = null, decCipher = null;
+		try {
+			encCipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+			decCipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+			byte[] keyBytes = password.getBytes("UTF-8");
+			MessageDigest sha = MessageDigest.getInstance("SHA-1");
+			keyBytes = sha.digest(keyBytes);
+			keyBytes = Arrays.copyOf(keyBytes, 16); // use only first 128 bit
+			SecretKey secretKey = new SecretKeySpec(keyBytes, "AES");
+			byte[] iv = sha.digest(Integer.toString(proxyServerPort).getBytes("UTF-8"));
+			iv = Arrays.copyOf(iv, 16);
+			encCipher.init(Cipher.ENCRYPT_MODE, secretKey, new IvParameterSpec(iv));
+			decCipher.init(Cipher.DECRYPT_MODE, secretKey, new IvParameterSpec(iv));
+		} catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e) {
+			e.printStackTrace();
+		}
 		
 		readBuffer.clear();
 		writeBuffer.clear();
-		int readByteCount = 0;			
+		int readByteCount = 0;
+		byte[] content = new byte[1500];
 		try {
 			readSocAddr = readSocketChannel.getRemoteAddress();
-			readByteCount = readSocketChannel.read(readBuffer);
+//			readByteCount = readSocketChannel.read(readBuffer);
+			int tmpcount = 0;
+			while((tmpcount = readSocketChannel.read(readBuffer)) > 0){
+				readBuffer.flip();
+				readByteCount += tmpcount;
+				readBuffer.get(content);
+				byte[] ciphertext = encCipher.update(content, 0, tmpcount);
+				writeBuffer.put(ciphertext);
+				writeBuffer.flip();
+				int writeCount = 0;
+				while(writeBuffer.hasRemaining())remoteSocket.write(writeBuffer);
+			}
+			if(tmpcount == -1){
+				if(key.attachment() != null){
+					proxyToLocal.remove(remoteSocket);
+					localToProxy.remove(readSocketChannel);
+				}
+				else{
+					localToProxy.remove(remoteSocket);
+					proxyToLocal.remove(readSocketChannel);
+				}	
+				remoteSocket.close();
+				remoteSocket.keyFor(selector).cancel();
+				key.cancel();
+				readSocketChannel.close();
+				return;
+			}
 		} catch (IOException e1) {
 			e1.printStackTrace();
 			logger.severe(e1.getMessage());
@@ -190,33 +237,7 @@ public class LocalProcessor implements Runnable {
 			readSocketChannel.close();
 			return;
 		}
-		if(readByteCount == -1){
-			if(key.attachment() != null){
-				proxyToLocal.remove(remoteSocket);
-				localToProxy.remove(readSocketChannel);
-			}
-			else{
-				localToProxy.remove(remoteSocket);
-				proxyToLocal.remove(readSocketChannel);
-			}	
-			remoteSocket.close();
-			remoteSocket.keyFor(selector).cancel();
-			key.cancel();
-			readSocketChannel.close();
-			return;
-		}
-		
-		Cipher cipher = null;
-		try {
-			cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-			SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1");
-			KeySpec spec = new PBEKeySpec(secretKey.toCharArray());
-			SecretKey tmp = factory.generateSecret(spec);
-			SecretKey secret = new SecretKeySpec(tmp.getEncoded(), "AES");
-			cipher.init(Cipher.ENCRYPT_MODE, secret);
-		} catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeySpecException | InvalidKeyException e) {
-			e.printStackTrace();
-		}
+				
 	}
 	
 	private class FileLogFormatter extends Formatter{
