@@ -204,6 +204,8 @@ public class LocalProcessor implements Runnable {
 				writeBuffer.flip();
 				int writeCount = 0;
 				while(writeBuffer.hasRemaining())remoteSocket.write(writeBuffer);
+				readBuffer.clear();
+				writeBuffer.clear();
 			}
 			if(tmpcount == -1){
 				if(key.attachment() != null){
